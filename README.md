@@ -36,7 +36,7 @@ Clip2MP3 streamlines the process of downloading YouTube content, allowing users 
 ### 1. Clone the Repository
 
 ```
-git clone [https://github.com/yourusername/clip2mp3.git](https://github.com/yourusername/clip2mp3.git)
+git clone https://github.com/<your-username>/Clip2MP3.git
 cd clip2mp3
 ```
 
