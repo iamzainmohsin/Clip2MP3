@@ -88,7 +88,12 @@ Contributions make the open-source community an amazing place to learn, inspire,
 4. Push to the Branch (`git push origin feature/AmazingFeature`)
     
 5. Open a Pull Request
-    
+
+## Disclaimer
+
+Clip2MP3 is intended **only for educational and personal learning purposes**.
+
+The author does **not condone downloading copyrighted content** in violation of YouTube's Terms of Service.
 
 ## License
 
