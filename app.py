@@ -10,20 +10,15 @@ Requires downloader.py to be in the same folder.
 """
 
 import os
+import sys
 import time
 import threading
 import queue
 import zipfile
+import subprocess
 from io import BytesIO
 
 import streamlit as st
-
-try:
-    import tkinter as tk
-    from tkinter import filedialog
-    TKINTER_AVAILABLE = True
-except Exception:
-    TKINTER_AVAILABLE = False
 
 from downloader import (
     DownloadJob,
@@ -35,6 +30,19 @@ from downloader import (
     run_batch_download,
     validate_url,
 )
+
+FOLDER_PICKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "folder_picker.py")
+
+
+def folder_picker_available() -> bool:
+    """
+    We can't reliably know in advance whether tkinter/a display is available
+    on the machine running this app without actually trying it (and trying
+    it safely means launching the subprocess). So this just checks the
+    helper script exists; folder_picker.py itself reports the real failure
+    reason if tkinter or a display isn't there when the button is clicked.
+    """
+    return os.path.isfile(FOLDER_PICKER_SCRIPT)
 
 st.set_page_config(page_title="YouTube Batch Downloader", page_icon="🎬", layout="centered")
 
@@ -70,28 +78,40 @@ def run_job_in_thread(job: DownloadJob, event_queue: "queue.Queue", result_holde
     event_queue.put(("__DONE__", "done", {}))
 
 
-def pick_folder_dialog(start_dir: str) -> str:
+def pick_folder_dialog(start_dir: str):
     """
-    Opens the native OS folder-browser dialog (the real file explorer window)
-    and returns the absolute path the user navigated to and selected.
-    Only works when this app runs on the same machine the user is sitting at
-    (a local desktop), since it needs a display. Returns "" if cancelled or
-    unavailable.
+    Opens the native OS folder-browser dialog by launching folder_picker.py
+    as a SEPARATE PROCESS (not a thread). This is required because tkinter's
+    Tk() must run on a process's main thread, and Streamlit runs app.py on a
+    worker thread — calling tkinter directly here would hang or crash the
+    server. Running it as a subprocess gives the dialog its own real main
+    thread, so it's safe, and a crash/hang there can't take this app down
+    with it.
+
+    Returns (path_or_none, error_message_or_none).
     """
-    if not TKINTER_AVAILABLE:
-        return ""
     try:
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)  # bring dialog to front
-        selected = filedialog.askdirectory(
-            initialdir=start_dir if os.path.isdir(start_dir) else os.path.expanduser("~"),
-            title="Select download folder",
+        result = subprocess.run(
+            [sys.executable, FOLDER_PICKER_SCRIPT, start_dir or ""],
+            capture_output=True,
+            text=True,
+            timeout=120,  # generous, since the user may take a while browsing
         )
-        root.destroy()
-        return selected
-    except Exception:
-        return ""
+    except subprocess.TimeoutExpired:
+        return None, "Folder picker timed out (took longer than 2 minutes). Please type the path manually."
+    except Exception as e:
+        return None, f"Couldn't launch the folder picker: {e}"
+
+    if result.returncode == 0:
+        path = result.stdout.strip()
+        return (path or None), None
+
+    # Non-zero exit: either the user cancelled the dialog (no error), or
+    # tkinter/display genuinely isn't available on this machine (stderr set).
+    stderr = (result.stderr or "").strip()
+    if stderr:
+        return None, f"Folder picker unavailable: {stderr.replace('ERROR: ', '')}"
+    return None, None  # user simply cancelled — not an error
 
 
 # ---------------------------------------------------------------------------
@@ -111,42 +131,36 @@ if not ffmpeg_available():
     )
 
 # ---------------------------------------------------------------------------
-# Download folder picker (native OS dialog, outside any form so the Browse
-# button can update state immediately without submitting anything)
+# Download folder picker (native OS dialog via a separate subprocess, outside
+# any form so the Browse button can update state immediately)
 # ---------------------------------------------------------------------------
 st.subheader("📁 Download folder")
 
 folder_col1, folder_col2 = st.columns([4, 1])
 with folder_col1:
-    st.text_input(
-        "Selected folder",
+    typed_path = st.text_input(
+        "Download folder",
         value=st.session_state.download_path,
-        key="download_path_display",
-        disabled=True,
         label_visibility="collapsed",
+        help="Type a path directly, or use Browse to open your system's folder picker.",
     )
+    if typed_path != st.session_state.download_path:
+        st.session_state.download_path = typed_path
 with folder_col2:
-    browse_clicked = st.button(
-        "Browse…" if TKINTER_AVAILABLE else "Browse (unavailable)",
-        disabled=not TKINTER_AVAILABLE,
-        use_container_width=True,
-    )
+    browse_clicked = st.button("Browse…", use_container_width=True)
 
 if browse_clicked:
-    chosen = pick_folder_dialog(st.session_state.download_path)
+    with st.spinner("Opening folder picker… (check for a new window, possibly behind this one)"):
+        chosen, error = pick_folder_dialog(st.session_state.download_path)
     if chosen:
         st.session_state.download_path = chosen
         st.rerun()
-
-if not TKINTER_AVAILABLE:
-    st.caption(
-        "Native folder browsing isn't available in this environment (no display / tkinter). "
-        "Type the path manually below instead."
-    )
-    st.session_state.download_path = st.text_input(
-        "Or type the folder path manually",
-        value=st.session_state.download_path,
-    )
+    elif error:
+        st.warning(
+            f"{error}\n\nThis can happen when the app is running on a remote/headless machine "
+            "with no display. Just type the folder path directly in the box above instead."
+        )
+    # if chosen is None and error is None, the user simply cancelled the dialog — do nothing
 
 # ---------------------------------------------------------------------------
 # Stage 1: paste URLs
